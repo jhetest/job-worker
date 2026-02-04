@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
+    "log"
 	"net/http"
 	"os"
 )
@@ -14,6 +16,33 @@ const (
 	baseURL   = "https://localhost:8443"
 	authToken = "secret-token-123"
 )
+
+func getTLSClient() *http.Client {
+    // Load client cert
+    cert, err := tls.LoadX509KeyPair("client.crt", "client.key")
+    if err != nil {
+        log.Fatalf("❌ Failed to load client cert/key: %v (Check if files exist in the current directory)", err)
+    }
+
+    // Load CA cert to verify server
+    caCert, err := os.ReadFile("ca.crt") // ioutil is deprecated, use os
+    if err != nil {
+        log.Fatalf("❌ Failed to read CA cert: %v", err)
+    }
+
+    caCertPool := x509.NewCertPool()
+    caCertPool.AppendCertsFromPEM(caCert)
+
+    tlsConfig := &tls.Config{
+        Certificates: []tls.Certificate{cert},
+        RootCAs:      caCertPool,
+        // ServerName: "localhost", // Explicitly tell Go we expect localhost
+    }
+
+    return &http.Client{
+        Transport: &http.Transport{TLSClientConfig: tlsConfig},
+    }
+}
 
 func getJob(client *http.Client, id string) {
 	req, _ := http.NewRequest("GET", baseURL+"/jobs/output?id="+id, nil)
@@ -135,10 +164,11 @@ func main() {
 	command := os.Args[1]
     fmt.Println("cmd: ", command)
 	// Setup custom client to handle self-signed certs for local dev
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-	}
-	client := &http.Client{Transport: tr}
+	// tr := &http.Transport{
+	//	 TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	// }
+	// client := &http.Client{Transport: tr}
+	client := getTLSClient()
     fmt.Println("cmd: ", command)
 	switch command {
     case "start":

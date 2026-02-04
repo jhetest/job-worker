@@ -1,11 +1,13 @@
 package main
 
 import (
+    "crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
-	"strings"
 	"job-worker/pkg/worker"
 )
 
@@ -18,27 +20,61 @@ type StartRequest struct {
 }
 
 func main() {
+    // 1. Load CA certificate to verify clients
+	caCert, _ := ioutil.ReadFile("ca.crt")
+	caCertPool := x509.NewCertPool()
+	caCertPool.AppendCertsFromPEM(caCert)
+
+    // 2. Configure TLS settings
+	tlsConfig := &tls.Config{
+		ClientCAs:    caCertPool,
+		ClientAuth:   tls.RequireAndVerifyClientCert, // Force mTLS
+		MinVersion:   tls.VersionTLS13,               // Only modern TLS
+		CipherSuites: []uint16{
+			tls.TLS_AES_128_GCM_SHA256,
+			tls.TLS_AES_256_GCM_SHA384,
+			tls.TLS_CHACHA20_POLY1305_SHA256,
+		},
+	}
+
+	server := &http.Server{
+    		Addr:      ":8443",
+    		TLSConfig: tlsConfig,
+    	}
 
     http.HandleFunc("/jobs/start", authMiddleware(handleStart))
 	http.HandleFunc("/jobs/stop", authMiddleware(handleStop))
 	http.HandleFunc("/jobs/status", authMiddleware(handleStatus))
 	http.HandleFunc("/jobs/output", authMiddleware(handleOutput))
 
-	log.Println("🔐 HTTPS Job Server starting on :8443...")
-	// Note: Use generate_cert.go or openssl to create certs for local testing
-	err := http.ListenAndServeTLS(":8443", "server.crt", "server.key", nil)
-	if err != nil {
-		log.Fatal("ListenAndServeTLS: ", err)
-	}
+	log.Println("🛡️ Hardened mTLS Server starting on :8443...")
+	log.Fatal(server.ListenAndServeTLS("server.crt", "server.key"))
 }
 
 func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
-		if !strings.HasPrefix(authHeader, "Bearer ") || strings.TrimPrefix(authHeader, "Bearer ") != AuthToken {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		// 1. Verify we have peer certificates (mTLS ensured this, but safety first)
+		if len(r.TLS.PeerCertificates) == 0 {
+			http.Error(w, "No client certificate provided", http.StatusUnauthorized)
 			return
 		}
+
+		// 2. Extract the Common Name
+		clientCN := r.TLS.PeerCertificates[0].Subject.CommonName
+		log.Printf("🔍 Authorization check for: %s", clientCN)
+
+		// 3. Simple Authorization Scheme
+		// In a real app, this might check a database or config file
+		allowedClients := map[string]bool{
+			"admin-client": true,
+		}
+
+		if !allowedClients[clientCN] {
+			log.Printf("🚫 Access Denied: %s is not authorized", clientCN)
+			http.Error(w, "Forbidden: Unauthorized client identity", http.StatusForbidden)
+			return
+		}
+
 		next(w, r)
 	}
 }
